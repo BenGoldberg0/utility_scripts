@@ -1,0 +1,18 @@
+#!/bin/bash
+
+if [ -z "$1" ]; then
+  echo "Error: You must provide a commit message."
+  echo "Usage: ./gitstuff \"Your commit message\""
+  exit 1
+fi
+
+echo "Staging all files..."
+git add .
+
+echo "Committing with message: $1"
+git commit -m "$1"
+
+echo "Pushing"
+git push
+
+echo "Git commands complete."
