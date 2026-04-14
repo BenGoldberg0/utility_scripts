@@ -1,0 +1,34 @@
+#!/bin/bash
+
+# Quick weather forecast using wttr.in
+# Usage: weather                        (auto-detected location)
+#        weather "new york"             (by city name)
+#        weather 90210                  (by US zip code)
+#        weather "SW1A 1AA" GB          (by postal code + country code)
+#        weather -s                     (one-line summary)
+#        weather -s 90210              (one-line summary by zip)
+#        weather -s "110 012" IN       (one-line summary by postal + country)
+
+short=false
+
+# Check for short flag
+if [ "$1" = "-s" ] || [ "$1" = "--short" ]; then
+  short=true
+  shift
+fi
+
+location="${1:-}"
+country="${2:-}"
+
+
+if [ -n "$country" ]; then
+  # spaces in postal codes need to be URL encoded
+  encoded=$(echo "$location" | sed 's/ /+/g')
+  location="${encoded},${country}"
+fi
+
+if [ "$short" = true ]; then
+  curl -s "wttr.in/${location}?format=%l:+%C+%t+%w\n"
+else
+  curl -s "wttr.in/${location}?F"
+fi

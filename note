@@ -1,0 +1,32 @@
+#!/bin/bash
+
+# Append a timestamped note to ~/notes.md
+# Usage: note "your thought here"
+#        note                      (opens notes in $EDITOR)
+#        note --list / -l          (print last 10 notes)
+
+NOTES_FILE="${NOTES_FILE:-$HOME/notes.md}"
+
+if [ ! -f "$NOTES_FILE" ]; then
+  echo "# Notes" > "$NOTES_FILE"
+  echo "" >> "$NOTES_FILE"
+fi
+
+if [ $# -eq 0 ]; then
+  ${EDITOR:-vim} "$NOTES_FILE"
+  exit 0
+fi
+
+if [ "$1" = "--list" ] || [ "$1" = "-l" ]; then
+  count="${2:-10}"
+  echo "Last $count notes:"
+  echo "---"
+  grep "^- " "$NOTES_FILE" | tail -n "$count"
+  exit 0
+fi
+
+timestamp=$(date "+%Y-%m-%d %H:%M")
+entry="- [$timestamp] $*"
+
+echo "$entry" >> "$NOTES_FILE"
+echo "Noted: $*"

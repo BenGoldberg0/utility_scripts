@@ -1,0 +1,64 @@
+#!/bin/bash
+
+# Switch to main/master, pull latest, switch back, and rebase.
+
+if ! git rev-parse --is-inside-work-tree > /dev/null 2>&1; then
+  echo "Error: Not a git repository."
+  exit 1
+fi
+
+# Figure out the default branch name
+if git show-ref --verify --quiet refs/heads/main; then
+  default_branch="main"
+elif git show-ref --verify --quiet refs/heads/master; then
+  default_branch="master"
+else
+  echo "Error: No 'main' or 'master' branch found."
+  exit 1
+fi
+
+current_branch=$(git branch --show-current)
+
+if [ -z "$current_branch" ]; then
+  echo "Error: Detached HEAD state. Check out a branch first."
+  exit 1
+fi
+
+# If already on the default branch, just pull
+if [ "$current_branch" = "$default_branch" ]; then
+  echo "Already on $default_branch. Pulling latest..."
+  git pull
+  exit $?
+fi
+
+# Check for uncommitted changes
+if ! git diff --quiet || ! git diff --cached --quiet; then
+  echo "Stashing uncommitted changes..."
+  stashed=true
+  git stash push -m "gitfresh auto-stash"
+fi
+
+echo "Switching to $default_branch..."
+git checkout "$default_branch"
+
+echo "Pulling latest..."
+git pull
+
+echo "Switching back to $current_branch..."
+git checkout "$current_branch"
+
+echo "Rebasing onto $default_branch..."
+if git rebase "$default_branch"; then
+  echo "Rebase successful."
+else
+  echo "Rebase conflicts detected. Resolve them, then run 'git rebase --continue'."
+  # Don't pop stash if rebase failed — user needs to handle conflicts first
+  exit 1
+fi
+
+if [ "$stashed" = true ]; then
+  echo "Restoring stashed changes..."
+  git stash pop
+fi
+
+echo "Done. $current_branch is up to date with $default_branch."

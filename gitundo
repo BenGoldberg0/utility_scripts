@@ -1,0 +1,29 @@
+#!/bin/bash
+
+# Undo the last commit, keeping changes staged.
+# Usage: gitundo [num_of_commits]
+
+count="${1:-1}"
+
+if ! [[ "$count" =~ ^[0-9]+$ ]] || [ "$count" -eq 0 ]; then
+  echo "Error: Please provide a positive number."
+  echo "Usage: gitundo [number_of_commits]"
+  exit 1
+fi
+
+if ! git rev-parse --is-inside-work-tree > /dev/null 2>&1; then
+  echo "Error: Not a git repository."
+  exit 1
+fi
+
+total=$(git rev-list --count HEAD 2>/dev/null)
+if [ "$count" -ge "$total" ]; then
+  echo "Error: Can't undo $count commit(s). Only $total commit(s) exist."
+  exit 1
+fi
+
+echo "Undoing last $count commit(s)..."
+git reset --soft HEAD~"$count"
+
+echo "Done. Your changes are still staged:"
+git status --short
