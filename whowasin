@@ -1,0 +1,138 @@
+#!/bin/bash
+
+# Build a unified timeline of who accessed the machine and when.
+# Combines: last (successful logins), lastb (failed logins), who (current sessions),
+#           and auth logs for SSH activity.
+# Usage: whowasin              (last 24 hours)
+#        whowasin 7            (last 7 days)
+#        whowasin --all        (everything available)
+#        whowasin --current    (just who's logged in right now)
+
+if [ "$(id -u)" -ne 0 ]; then
+  echo "Error: Must run as root (use sudo)."
+  exit 1
+fi
+
+range="$1"
+
+# --- Current sessions ---
+if [ "$range" = "--current" ]; then
+  echo "Currently logged in:"
+  echo ""
+  who -u 2>/dev/null
+  echo ""
+  sessions=$(who 2>/dev/null | wc -l)
+  echo "${sessions} active session(s)."
+  exit 0
+fi
+
+# Determine time filter
+if [ "$range" = "--all" ]; then
+  since=""
+  since_journal=""
+  label="all available records"
+elif [[ "$range" =~ ^[0-9]+$ ]]; then
+  since=$(date -d "$range days ago" "+%Y-%m-%d" 2>/dev/null)
+  since_journal="--since=${range} days ago"
+  label="last ${range} day(s)"
+else
+  since=$(date -d "1 day ago" "+%Y-%m-%d" 2>/dev/null)
+  since_journal="--since=24 hours ago"
+  label="last 24 hours"
+fi
+
+echo "Access timeline — ${label}"
+echo ""
+
+# --- Currently logged in ---
+echo "=== CURRENTLY LOGGED IN ==="
+echo ""
+who -u 2>/dev/null || echo "  (none)"
+echo ""
+
+# --- Successful logins ---
+echo "=== SUCCESSFUL LOGINS ==="
+echo ""
+if [ -n "$since" ]; then
+  last -F 2>/dev/null | grep -v "^$" | grep -v "^wtmp\|^reboot\|^shutdown" \
+    | awk -v since="$since" '{
+      # Extract the date portion and compare
+      print
+    }' | head -40
+else
+  last -F 2>/dev/null | grep -v "^$" | grep -v "^wtmp\|^reboot\|^shutdown" | head -40
+fi
+echo ""
+
+# --- Failed logins ---
+echo "=== FAILED LOGINS ==="
+echo ""
+failed=$(lastb -F 2>/dev/null | grep -v "^$" | grep -v "^btmp" | head -40)
+if [ -n "$failed" ]; then
+  echo "$failed"
+else
+  echo "  (none)"
+fi
+echo ""
+
+# --- SSH activity from logs ---
+echo "=== SSH LOG ACTIVITY ==="
+echo ""
+
+get_ssh_logs() {
+  if command -v journalctl > /dev/null 2>&1; then
+    journalctl _SYSTEMD_UNIT=sshd.service $since_journal --no-pager 2>/dev/null \
+      || journalctl _SYSTEMD_UNIT=ssh.service $since_journal --no-pager 2>/dev/null
+  elif [ -f /var/log/auth.log ]; then
+    cat /var/log/auth.log
+  elif [ -f /var/log/secure ]; then
+    cat /var/log/secure
+  fi
+}
+
+ssh_logs=$(get_ssh_logs 2>/dev/null)
+
+if [ -n "$ssh_logs" ]; then
+  # Accepted connections
+  accepted=$(echo "$ssh_logs" | grep "Accepted" | tail -20)
+  if [ -n "$accepted" ]; then
+    echo "[Accepted connections]"
+    echo "$accepted" | while IFS= read -r line; do
+      echo "  $line"
+    done
+    echo ""
+  fi
+
+  # Failed attempts
+  rejected=$(echo "$ssh_logs" | grep -i "failed password\|invalid user" | tail -20)
+  if [ -n "$rejected" ]; then
+    echo "[Failed attempts]"
+    echo "$rejected" | while IFS= read -r line; do
+      echo "  $line"
+    done
+    echo ""
+  fi
+
+  # Disconnections
+  closed=$(echo "$ssh_logs" | grep -i "disconnected\|connection closed" | tail -20)
+  if [ -n "$closed" ]; then
+    echo "[Disconnections]"
+    echo "$closed" | while IFS= read -r line; do
+      echo "  $line"
+    done
+    echo ""
+  fi
+else
+  echo "  (no SSH logs found)"
+fi
+
+# --- Summary ---
+echo "=== SUMMARY ==="
+echo ""
+current=$(who 2>/dev/null | wc -l)
+success=$(last 2>/dev/null | grep -v "^$" | grep -v "^wtmp\|^reboot\|^shutdown" | wc -l)
+failures=$(lastb 2>/dev/null | grep -v "^$" | grep -v "^btmp" | wc -l)
+
+echo "  Active sessions:    $current"
+echo "  Successful logins:  $success (total on record)"
+echo "  Failed attempts:    $failures (total on record)"

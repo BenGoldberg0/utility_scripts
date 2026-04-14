@@ -1,0 +1,95 @@
+#!/bin/bash
+
+# Snapshot open ports and compare against the last snapshot.
+# Usage: portdiff              (snapshot and diff)
+#        portdiff --show        (show current snapshot without diffing)
+#        portdiff --reset       (delete saved snapshot and start fresh)
+
+SNAPSHOT_DIR="${PORTDIFF_DIR:-$HOME/.portdiff}"
+CURRENT="$SNAPSHOT_DIR/current.txt"
+PREVIOUS="$SNAPSHOT_DIR/previous.txt"
+
+if [ "$(id -u)" -ne 0 ]; then
+  echo "Error: Must run as root (use sudo)."
+  exit 1
+fi
+
+mkdir -p "$SNAPSHOT_DIR"
+
+take_snapshot() {
+  ss -tulnp 2>/dev/null | tail -n +2 | awk '{
+    split($5, a, ":");
+    port = a[length(a)];
+    proto = $1;
+    proc = $7;
+    gsub(/.*"/, "", proc);
+    gsub(/".*/, "", proc);
+    addr = $5;
+    printf "%-6s %-8s %-25s %s\n", proto, port, addr, proc
+  }' | sort -k2 -n
+}
+
+if [ "$1" = "--reset" ]; then
+  rm -f "$CURRENT" "$PREVIOUS"
+  echo "Snapshots cleared."
+  exit 0
+fi
+
+if [ "$1" = "--show" ]; then
+  echo "Current listening ports:"
+  echo ""
+  printf "%-6s %-8s %-25s %s\n" "PROTO" "PORT" "ADDRESS" "PROCESS"
+  printf "%-6s %-8s %-25s %s\n" "-----" "----" "-------" "-------"
+  take_snapshot
+  exit 0
+fi
+
+# Take a new snapshot
+snapshot=$(take_snapshot)
+
+# If there's an existing current, rotate it to previous
+if [ -f "$CURRENT" ]; then
+  mv "$CURRENT" "$PREVIOUS"
+fi
+
+echo "$snapshot" > "$CURRENT"
+
+# If no previous snapshot to compare, just show current
+if [ ! -f "$PREVIOUS" ]; then
+  echo "First snapshot saved. Run again later to see changes."
+  echo ""
+  printf "%-6s %-8s %-25s %s\n" "PROTO" "PORT" "ADDRESS" "PROCESS"
+  printf "%-6s %-8s %-25s %s\n" "-----" "----" "-------" "-------"
+  echo "$snapshot"
+  exit 0
+fi
+
+# Diff
+new_ports=$(comm -13 "$PREVIOUS" "$CURRENT")
+closed_ports=$(comm -23 "$PREVIOUS" "$CURRENT")
+
+if [ -z "$new_ports" ] && [ -z "$closed_ports" ]; then
+  echo "No changes since last snapshot."
+  exit 0
+fi
+
+if [ -n "$new_ports" ]; then
+  echo "NEW ports since last snapshot:"
+  echo ""
+  printf "  %-6s %-8s %-25s %s\n" "PROTO" "PORT" "ADDRESS" "PROCESS"
+  printf "  %-6s %-8s %-25s %s\n" "-----" "----" "-------" "-------"
+  echo "$new_ports" | while IFS= read -r line; do
+    echo "  $line"
+  done
+  echo ""
+fi
+
+if [ -n "$closed_ports" ]; then
+  echo "CLOSED ports since last snapshot:"
+  echo ""
+  printf "  %-6s %-8s %-25s %s\n" "PROTO" "PORT" "ADDRESS" "PROCESS"
+  printf "  %-6s %-8s %-25s %s\n" "-----" "----" "-------" "-------"
+  echo "$closed_ports" | while IFS= read -r line; do
+    echo "  $line"
+  done
+fi

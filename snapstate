@@ -1,0 +1,148 @@
+#!/bin/bash
+
+# Capture a point-in-time snapshot of the system's security state.
+# Saves to a timestamped file for baselining or post-incident review.
+# Usage: snapstate                (save snapshot to ~/.snapstate/)
+#        snapstate /path/to/dir   (save to a custom directory)
+#        snapstate --diff          (compare last two snapshots)
+
+if [ "$(id -u)" -ne 0 ]; then
+  echo "Error: Must run as root (use sudo)."
+  exit 1
+fi
+
+OUTPUT_DIR="${1:-$HOME/.snapstate}"
+
+# Handle --diff mode
+if [ "$1" = "--diff" ]; then
+  OUTPUT_DIR="${2:-$HOME/.snapstate}"
+  latest=$(ls -1t "$OUTPUT_DIR"/snapshot_*.txt 2>/dev/null | head -1)
+  previous=$(ls -1t "$OUTPUT_DIR"/snapshot_*.txt 2>/dev/null | sed -n '2p')
+
+  if [ -z "$latest" ] || [ -z "$previous" ]; then
+    echo "Error: Need at least two snapshots to diff."
+    exit 1
+  fi
+
+  echo "Comparing:"
+  echo "  OLD: $(basename "$previous")"
+  echo "  NEW: $(basename "$latest")"
+  echo ""
+  diff --color=auto -u "$previous" "$latest" | tail -n +3
+  exit 0
+fi
+
+mkdir -p "$OUTPUT_DIR"
+
+timestamp=$(date "+%Y%m%d_%H%M%S")
+outfile="$OUTPUT_DIR/snapshot_${timestamp}.txt"
+
+{
+  echo "=============================================="
+  echo "SYSTEM SECURITY SNAPSHOT"
+  echo "Taken: $(date "+%Y-%m-%d %H:%M:%S %Z")"
+  echo "Hostname: $(hostname)"
+  echo "Kernel: $(uname -r)"
+  echo "Uptime: $(uptime -p 2>/dev/null || uptime)"
+  echo "=============================================="
+
+  echo ""
+  echo "=== LOGGED IN USERS ==="
+  echo ""
+  who 2>/dev/null || echo "(unavailable)"
+
+  echo ""
+  echo "=== LISTENING PORTS ==="
+  echo ""
+  ss -tulnp 2>/dev/null || netstat -tulnp 2>/dev/null || echo "(unavailable)"
+
+  echo ""
+  echo "=== ACTIVE CONNECTIONS (ESTABLISHED) ==="
+  echo ""
+  ss -tunp state established 2>/dev/null | head -50
+  total_conn=$(ss -tunp state established 2>/dev/null | tail -n +2 | wc -l)
+  echo ""
+  echo "(${total_conn} total established connections)"
+
+  echo ""
+  echo "=== RUNNING PROCESSES ==="
+  echo ""
+  ps auxf --sort=-%mem 2>/dev/null | head -50
+  total_proc=$(ps aux --no-headers 2>/dev/null | wc -l)
+  echo ""
+  echo "(${total_proc} total processes)"
+
+  echo ""
+  echo "=== RECENT LOGINS (last 20) ==="
+  echo ""
+  last -20 2>/dev/null || echo "(unavailable)"
+
+  echo ""
+  echo "=== FAILED LOGIN ATTEMPTS (last 20) ==="
+  echo ""
+  lastb -20 2>/dev/null || echo "(unavailable)"
+
+  echo ""
+  echo "=== CRON JOBS (user crontabs) ==="
+  echo ""
+  for user in $(cut -d: -f1 /etc/passwd); do
+    crontab=$(crontab -l -u "$user" 2>/dev/null | grep -v '^#' | grep -v '^$')
+    if [ -n "$crontab" ]; then
+      echo "[$user]"
+      echo "$crontab"
+      echo ""
+    fi
+  done
+
+  echo ""
+  echo "=== SYSTEMD TIMERS ==="
+  echo ""
+  systemctl list-timers --all --no-pager 2>/dev/null || echo "(unavailable)"
+
+  echo ""
+  echo "=== FIREWALL RULES ==="
+  echo ""
+  if command -v firewall-cmd > /dev/null 2>&1; then
+    firewall-cmd --list-all 2>/dev/null
+  elif command -v iptables > /dev/null 2>&1; then
+    iptables -L -n -v 2>/dev/null
+  elif command -v nft > /dev/null 2>&1; then
+    nft list ruleset 2>/dev/null
+  else
+    echo "(no firewall tool found)"
+  fi
+
+  echo ""
+  echo "=== SUID/SGID FILES ==="
+  echo ""
+  find / -type f \( -perm -4000 -o -perm -2000 \) -ls 2>/dev/null
+
+  echo ""
+  echo "=== WORLD-WRITABLE FILES (excluding /proc /sys /dev) ==="
+  echo ""
+  find / -path /proc -prune -o -path /sys -prune -o -path /dev -prune \
+    -o -type f -perm -0002 -print 2>/dev/null | head -50
+
+  echo ""
+  echo "=== END OF SNAPSHOT ==="
+
+} > "$outfile"
+
+echo "Snapshot saved: $outfile"
+echo ""
+echo "Sections captured:"
+echo "  - Logged in users"
+echo "  - Listening ports"
+echo "  - Active connections"
+echo "  - Running processes"
+echo "  - Recent logins & failures"
+echo "  - Cron jobs & timers"
+echo "  - Firewall rules"
+echo "  - SUID/SGID files"
+echo "  - World-writable files"
+echo ""
+
+count=$(ls -1 "$OUTPUT_DIR"/snapshot_*.txt 2>/dev/null | wc -l)
+if [ "$count" -ge 2 ]; then
+  echo "You have ${count} snapshots. Run 'snapstate --diff' to compare the last two."
+fi

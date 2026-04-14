@@ -1,0 +1,88 @@
+#!/bin/bash
+
+# Flag processes running from suspicious locations or in suspicious states.
+# Checks for: processes in /tmp, /dev/shm, /var/tmp, deleted binaries,
+#              hidden paths, and processes with no backing executable.
+# Usage: susprocess
+
+if [ "$(id -u)" -ne 0 ]; then
+  echo "Error: Must run as root (use sudo)."
+  exit 1
+fi
+
+found=0
+
+check() {
+  local label="$1"
+  local results="$2"
+
+  if [ -n "$results" ]; then
+    if [ "$found" -eq 0 ]; then
+      echo "Suspicious processes found:"
+      echo ""
+    fi
+    found=1
+    echo "--- $label ---"
+    echo ""
+    echo "$results"
+    echo ""
+  fi
+}
+
+# Processes running from /tmp, /dev/shm, /var/tmp
+sus_dirs=$(ps aux --no-headers 2>/dev/null | awk '$11 ~ /^\/(tmp|dev\/shm|var\/tmp)/' | \
+  awk '{printf "  PID %-8s USER %-12s CMD %s\n", $2, $1, $11}')
+check "Running from /tmp, /dev/shm, or /var/tmp" "$sus_dirs"
+
+# Deleted binaries (process still running but binary removed from disk)
+deleted=""
+for pid in /proc/[0-9]*; do
+  p=$(basename "$pid")
+  exe=$(readlink "$pid/exe" 2>/dev/null)
+  if echo "$exe" | grep -q "(deleted)"; then
+    user=$(stat -c '%U' "$pid" 2>/dev/null)
+    cmd=$(cat "$pid/cmdline" 2>/dev/null | tr '\0' ' ')
+    deleted+="  PID ${p}  USER ${user}  EXE ${exe}  CMD ${cmd}"$'\n'
+  fi
+done
+check "Running from deleted binaries" "$(echo "$deleted" | grep -v '^$')"
+
+# Processes running from hidden directories
+hidden=$(ps aux --no-headers 2>/dev/null | awk '$11 ~ /\/\./' | \
+  awk '{printf "  PID %-8s USER %-12s CMD %s\n", $2, $1, $11}')
+check "Running from hidden directories" "$hidden"
+
+# Processes with no readable exe link (may indicate tampering)
+no_exe=""
+for pid in /proc/[0-9]*; do
+  p=$(basename "$pid")
+  # Skip kernel threads
+  [ -f "$pid/exe" ] || continue
+  if ! readlink "$pid/exe" > /dev/null 2>&1; then
+    user=$(stat -c '%U' "$pid" 2>/dev/null)
+    cmd=$(cat "$pid/cmdline" 2>/dev/null | tr '\0' ' ')
+    [ -z "$cmd" ] && continue  # kernel thread
+    no_exe+="  PID ${p}  USER ${user}  CMD ${cmd}"$'\n'
+  fi
+done
+check "No readable executable link" "$(echo "$no_exe" | grep -v '^$')"
+
+# Processes running as root from user-writable directories
+root_writable=""
+for pid in /proc/[0-9]*; do
+  p=$(basename "$pid")
+  exe=$(readlink "$pid/exe" 2>/dev/null) || continue
+  owner=$(stat -c '%U' "$pid" 2>/dev/null)
+  [ "$owner" != "root" ] && continue
+  dir=$(dirname "$exe")
+  if [ -w "$dir" ] 2>/dev/null && [[ "$dir" != /usr* ]] && [[ "$dir" != /bin* ]] && \
+     [[ "$dir" != /sbin* ]] && [[ "$dir" != /lib* ]] && [[ "$dir" != /opt* ]]; then
+    cmd=$(cat "$pid/cmdline" 2>/dev/null | tr '\0' ' ')
+    root_writable+="  PID ${p}  DIR ${dir}  CMD ${cmd}"$'\n'
+  fi
+done
+check "Root processes in user-writable directories" "$(echo "$root_writable" | grep -v '^$')"
+
+if [ "$found" -eq 0 ]; then
+  echo "No suspicious processes found. Looking clean."
+fi

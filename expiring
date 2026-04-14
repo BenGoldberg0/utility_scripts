@@ -1,0 +1,182 @@
+#!/bin/bash
+
+# Check for soon-to-expire SSL certs, user passwords, and SSH keys.
+# Usage: expiring              (things expiring within 30 days)
+#        expiring 7            (things expiring within 7 days)
+#        expiring 90           (things expiring within 90 days)
+
+if [ "$(id -u)" -ne 0 ]; then
+  echo "Error: Must run as root (use sudo)."
+  exit 1
+fi
+
+days="${1:-30}"
+seconds=$((days * 86400))
+now=$(date +%s)
+warnings=0
+
+echo "Checking for things expiring within ${days} day(s)..."
+echo ""
+
+# --- SSL/TLS Certificates ---
+echo "=== SSL/TLS CERTIFICATES ==="
+echo ""
+
+cert_dirs=(
+  /etc/ssl/certs
+  /etc/pki/tls/certs
+  /etc/letsencrypt/live
+  /etc/nginx/ssl
+  /etc/apache2/ssl
+  /etc/httpd/ssl
+)
+
+found_certs=false
+
+for dir in "${cert_dirs[@]}"; do
+  [ -d "$dir" ] || continue
+  while IFS= read -r cert; do
+    [ -f "$cert" ] || continue
+
+    # Skip if not a PEM certificate
+    grep -q "BEGIN CERTIFICATE" "$cert" 2>/dev/null || continue
+
+    expiry=$(openssl x509 -enddate -noout -in "$cert" 2>/dev/null | cut -d= -f2)
+    [ -z "$expiry" ] && continue
+
+    expiry_epoch=$(date -d "$expiry" +%s 2>/dev/null)
+    [ -z "$expiry_epoch" ] && continue
+
+    remaining=$(( (expiry_epoch - now) / 86400 ))
+
+    if [ "$remaining" -le "$days" ]; then
+      found_certs=true
+      warnings=$((warnings + 1))
+      subject=$(openssl x509 -subject -noout -in "$cert" 2>/dev/null | sed 's/subject=//')
+
+      if [ "$remaining" -lt 0 ]; then
+        status="EXPIRED ($(( remaining * -1 )) days ago)"
+      elif [ "$remaining" -eq 0 ]; then
+        status="EXPIRES TODAY"
+      else
+        status="expires in ${remaining} day(s)"
+      fi
+
+      echo "  [!] $cert"
+      echo "      Subject: $subject"
+      echo "      $status — $expiry"
+      echo ""
+    fi
+  done < <(find "$dir" -type f \( -name "*.pem" -o -name "*.crt" -o -name "*.cert" \) 2>/dev/null)
+done
+
+if [ "$found_certs" = false ]; then
+  echo "  (no expiring certificates found)"
+  echo ""
+fi
+
+# --- User Password Expiry ---
+echo "=== USER PASSWORDS ==="
+echo ""
+
+found_passwords=false
+
+while IFS=: read -r user _ uid _ _ _ shell; do
+  # Skip system accounts and nologin users
+  [ "$uid" -lt 1000 ] 2>/dev/null && continue
+  echo "$shell" | grep -qE "(nologin|false)$" && continue
+
+  # Get password aging info
+  expiry_date=$(chage -l "$user" 2>/dev/null | grep "Password expires" | cut -d: -f2 | xargs)
+
+  [ -z "$expiry_date" ] && continue
+  [ "$expiry_date" = "never" ] && continue
+
+  expiry_epoch=$(date -d "$expiry_date" +%s 2>/dev/null)
+  [ -z "$expiry_epoch" ] && continue
+
+  remaining=$(( (expiry_epoch - now) / 86400 ))
+
+  if [ "$remaining" -le "$days" ]; then
+    found_passwords=true
+    warnings=$((warnings + 1))
+
+    if [ "$remaining" -lt 0 ]; then
+      status="EXPIRED ($(( remaining * -1 )) days ago)"
+    elif [ "$remaining" -eq 0 ]; then
+      status="EXPIRES TODAY"
+    else
+      status="expires in ${remaining} day(s)"
+    fi
+
+    last_change=$(chage -l "$user" 2>/dev/null | grep "Last password change" | cut -d: -f2 | xargs)
+    echo "  [!] $user — $status"
+    echo "      Last changed: $last_change"
+    echo ""
+  fi
+done < /etc/passwd
+
+if [ "$found_passwords" = false ]; then
+  echo "  (no expiring passwords found)"
+  echo ""
+fi
+
+# --- SSH Key Age ---
+echo "=== SSH HOST & USER KEYS ==="
+echo ""
+
+found_keys=false
+
+check_key_age() {
+  local keyfile="$1"
+  local label="$2"
+
+  [ -f "$keyfile" ] || return
+
+  created_epoch=$(stat -c %Y "$keyfile" 2>/dev/null)
+  [ -z "$created_epoch" ] && return
+
+  age_days=$(( (now - created_epoch) / 86400 ))
+
+  # SSH keys don't technically expire, but flag old ones
+  # Flag if older than 365 days (or custom threshold)
+  key_warn_days="${SSH_KEY_AGE_WARN:-365}"
+
+  if [ "$age_days" -ge "$key_warn_days" ]; then
+    found_keys=true
+    warnings=$((warnings + 1))
+    created=$(date -d "@$created_epoch" "+%Y-%m-%d")
+    echo "  [!] $label"
+    echo "      File: $keyfile"
+    echo "      Created: $created (${age_days} days old)"
+    echo ""
+  fi
+}
+
+# Host keys
+for keyfile in /etc/ssh/ssh_host_*_key; do
+  check_key_age "$keyfile" "SSH host key"
+done
+
+# User keys
+while IFS=: read -r user _ uid _ _ home _; do
+  [ "$uid" -lt 1000 ] 2>/dev/null && continue
+  for keyfile in "$home"/.ssh/id_*; do
+    echo "$keyfile" | grep -q '\.pub$' && continue
+    check_key_age "$keyfile" "User key ($user)"
+  done
+done < /etc/passwd
+
+if [ "$found_keys" = false ]; then
+  echo "  (no old SSH keys found — threshold: ${SSH_KEY_AGE_WARN:-365} days)"
+  echo ""
+fi
+
+# --- Summary ---
+echo "=== SUMMARY ==="
+echo ""
+if [ "$warnings" -eq 0 ]; then
+  echo "  Nothing expiring within ${days} day(s). Looking good."
+else
+  echo "  ${warnings} item(s) need attention within ${days} day(s)."
+fi
