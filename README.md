@@ -33,7 +33,7 @@ for zip codes, run `weather 90210`. for international postal codes, add a countr
 ## fwtmp
 run `sudo fwtmp <port> [minutes] [protocol]` to temporarily open a firewall port that auto-closes.
 
-`sudo fwtmp 3000` opens port 3000 for 5 minutes. `sudo fwtmp 3000 15` keeps it open for 15. defaults to tcp, pass `udp` as a third arg if needed.
+`sudo fwtmp 3000` opens port 3000 for 5 minutes. `sudo fwtmp 3000 15` keeps it open for 15. defaults to tcp, pass `udp` as a third arg if needed. works with both ufw and firewalld (auto-detected).
 
 ## loginfails
 run `sudo loginfails` to see failed SSH login attempts grouped by IP.
