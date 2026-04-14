@@ -1,0 +1,68 @@
+#!/bin/bash
+
+# Temporarily open a firewall port that auto-closes after a set time.
+# Usage: fwtmp <port> [minutes] [protocol]
+#        fwtmp 3000          (opens port 3000 for 5 minutes, tcp)
+#        fwtmp 3000 15       (opens port 3000 for 15 minutes, tcp)
+#        fwtmp 5353 10 udp   (opens port 5353 for 10 minutes, udp)
+
+if [ "$(id -u)" -ne 0 ]; then
+  echo "Error: Must run as root (use sudo)."
+  exit 1
+fi
+
+if ! command -v firewall-cmd > /dev/null 2>&1; then
+  echo "Error: firewalld is not installed."
+  exit 1
+fi
+
+if ! systemctl is-active --quiet firewalld; then
+  echo "Error: firewalld is not running."
+  exit 1
+fi
+
+if [ $# -eq 0 ]; then
+  echo "Usage: fwtmp <port> [minutes] [protocol]"
+  echo "  port       port number to open"
+  echo "  minutes    how long to keep it open (default: 5)"
+  echo "  protocol   tcp or udp (default: tcp)"
+  exit 1
+fi
+
+port="$1"
+minutes="${2:-5}"
+protocol="${3:-tcp}"
+
+if ! [[ "$port" =~ ^[0-9]+$ ]] || [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
+  echo "Error: Invalid port number."
+  exit 1
+fi
+
+if ! [[ "$minutes" =~ ^[0-9]+$ ]] || [ "$minutes" -eq 0 ]; then
+  echo "Error: Minutes must be a positive number."
+  exit 1
+fi
+
+if [ "$protocol" != "tcp" ] && [ "$protocol" != "udp" ]; then
+  echo "Error: Protocol must be 'tcp' or 'udp'."
+  exit 1
+fi
+
+# Open the port (runtime only, not permanent)
+if firewall-cmd --add-port="${port}/${protocol}" --quiet; then
+  echo "Opened port ${port}/${protocol} for ${minutes} minute(s)."
+else
+  echo "Error: Failed to open port."
+  exit 1
+fi
+
+# Schedule the close in the background
+(
+  sleep $(( minutes * 60 ))
+  firewall-cmd --remove-port="${port}/${protocol}" --quiet
+  echo ""
+  echo "Auto-closed port ${port}/${protocol} after ${minutes} minute(s)."
+) &
+
+echo "It will auto-close at $(date -d "+${minutes} minutes" "+%H:%M:%S")."
+echo "To close it early: firewall-cmd --remove-port=${port}/${protocol}"

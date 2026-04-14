@@ -1,0 +1,62 @@
+#!/bin/bash
+
+# Show failed SSH login attempts, grouped by IP.
+# Usage: loginfails            (last 24 hours)
+#        loginfails 7          (last 7 days)
+#        loginfails --all      (everything available)
+
+if [ "$(id -u)" -ne 0 ]; then
+  echo "Error: Must run as root (use sudo)."
+  exit 1
+fi
+
+range="$1"
+
+# Build the journalctl time filter
+if [ "$range" = "--all" ]; then
+  since_flag=""
+  label="all time"
+elif [[ "$range" =~ ^[0-9]+$ ]]; then
+  since_flag="--since=${range} days ago"
+  label="last ${range} day(s)"
+else
+  since_flag="--since=24 hours ago"
+  label="last 24 hours"
+fi
+
+echo "Failed SSH login attempts — ${label}"
+echo "---"
+
+# Try journalctl first, fall back to auth.log
+if command -v journalctl > /dev/null 2>&1; then
+  raw=$(journalctl _SYSTEMD_UNIT=sshd.service $since_flag --no-pager 2>/dev/null \
+    || journalctl _SYSTEMD_UNIT=ssh.service $since_flag --no-pager 2>/dev/null)
+  fails=$(echo "$raw" | grep -i "failed password\|authentication failure\|invalid user" \
+    | grep -oP 'from \K[0-9a-f.:]+' | sort | uniq -c | sort -rn)
+elif [ -f /var/log/auth.log ]; then
+  fails=$(grep -i "failed password\|authentication failure\|invalid user" /var/log/auth.log \
+    | grep -oP 'from \K[0-9a-f.:]+' | sort | uniq -c | sort -rn)
+elif [ -f /var/log/secure ]; then
+  fails=$(grep -i "failed password\|authentication failure\|invalid user" /var/log/secure \
+    | grep -oP 'from \K[0-9a-f.:]+' | sort | uniq -c | sort -rn)
+else
+  echo "Error: No supported log source found."
+  exit 1
+fi
+
+if [ -z "$fails" ]; then
+  echo "No failed attempts found. Looking good."
+  exit 0
+fi
+
+total=$(echo "$fails" | awk '{sum += $1} END {print sum}')
+
+echo ""
+printf "  %-8s  %s\n" "ATTEMPTS" "IP ADDRESS"
+printf "  %-8s  %s\n" "--------" "----------"
+echo "$fails" | while read -r count ip; do
+  printf "  %-8s  %s\n" "$count" "$ip"
+done
+
+echo ""
+echo "Total: ${total} failed attempt(s) from $(echo "$fails" | wc -l | tr -d ' ') unique IP(s)."
