@@ -1,6 +1,7 @@
 #!/bin/bash
 
 # Temporarily open a firewall port that auto-closes after a set time.
+# Works with both ufw and firewalld (auto-detected).
 # Usage: fwtmp <port> [minutes] [protocol]
 #        fwtmp 3000          (opens port 3000 for 5 minutes, tcp)
 #        fwtmp 3000 15       (opens port 3000 for 15 minutes, tcp)
@@ -11,13 +12,13 @@ if [ "$(id -u)" -ne 0 ]; then
   exit 1
 fi
 
-if ! command -v firewall-cmd > /dev/null 2>&1; then
-  echo "Error: firewalld is not installed."
-  exit 1
-fi
-
-if ! systemctl is-active --quiet firewalld; then
-  echo "Error: firewalld is not running."
+# Detect firewall
+if command -v ufw > /dev/null 2>&1 && ufw status | grep -q "active"; then
+  FIREWALL="ufw"
+elif command -v firewall-cmd > /dev/null 2>&1 && systemctl is-active --quiet firewalld; then
+  FIREWALL="firewalld"
+else
+  echo "Error: No supported firewall found (ufw or firewalld)."
   exit 1
 fi
 
@@ -26,6 +27,8 @@ if [ $# -eq 0 ]; then
   echo "  port       port number to open"
   echo "  minutes    how long to keep it open (default: 5)"
   echo "  protocol   tcp or udp (default: tcp)"
+  echo ""
+  echo "Detected firewall: $FIREWALL"
   exit 1
 fi
 
@@ -48,21 +51,39 @@ if [ "$protocol" != "tcp" ] && [ "$protocol" != "udp" ]; then
   exit 1
 fi
 
-# Open the port (runtime only, not permanent)
-if firewall-cmd --add-port="${port}/${protocol}" --quiet; then
-  echo "Opened port ${port}/${protocol} for ${minutes} minute(s)."
+# Open the port
+if [ "$FIREWALL" = "ufw" ]; then
+  if ufw allow "${port}/${protocol}" > /dev/null; then
+    echo "Opened port ${port}/${protocol} for ${minutes} minute(s). [ufw]"
+  else
+    echo "Error: Failed to open port."
+    exit 1
+  fi
 else
-  echo "Error: Failed to open port."
-  exit 1
+  if firewall-cmd --add-port="${port}/${protocol}" --quiet; then
+    echo "Opened port ${port}/${protocol} for ${minutes} minute(s). [firewalld]"
+  else
+    echo "Error: Failed to open port."
+    exit 1
+  fi
 fi
 
 # Schedule the close in the background
 (
   sleep $(( minutes * 60 ))
-  firewall-cmd --remove-port="${port}/${protocol}" --quiet
+  if [ "$FIREWALL" = "ufw" ]; then
+    ufw delete allow "${port}/${protocol}" > /dev/null
+  else
+    firewall-cmd --remove-port="${port}/${protocol}" --quiet
+  fi
   echo ""
   echo "Auto-closed port ${port}/${protocol} after ${minutes} minute(s)."
 ) &
 
 echo "It will auto-close at $(date -d "+${minutes} minutes" "+%H:%M:%S")."
-echo "To close it early: firewall-cmd --remove-port=${port}/${protocol}"
+
+if [ "$FIREWALL" = "ufw" ]; then
+  echo "To close it early: ufw delete allow ${port}/${protocol}"
+else
+  echo "To close it early: firewall-cmd --remove-port=${port}/${protocol}"
+fi
