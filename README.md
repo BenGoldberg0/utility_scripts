@@ -29,3 +29,13 @@ run `note` with no arguments to open your notes in your editor. run `note -l` to
 run `weather` for a forecast of your current location, or `weather "new york"` for a specific city.
 
 for zip codes, run `weather 90210`. for international postal codes, add a country code like `weather "SW1A 1AA" GB`. add `-s` for a one-line summary.
+
+## fwtmp
+run `sudo fwtmp <port> [minutes] [protocol]` to temporarily open a firewall port that auto-closes.
+
+`sudo fwtmp 3000` opens port 3000 for 5 minutes. `sudo fwtmp 3000 15` keeps it open for 15. defaults to tcp, pass `udp` as a third arg if needed.
+
+## loginfails
+run `sudo loginfails` to see failed SSH login attempts grouped by IP.
+
+defaults to the last 24 hours. `sudo loginfails 7` looks back 7 days, `sudo loginfails --all` searches everything. works with journalctl, auth.log, and secure.
