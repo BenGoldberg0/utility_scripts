@@ -1,0 +1,32 @@
+#!/bin/bash
+
+# Stage all changes, commit with a message, and push.
+# Usage: gitstuff "Your commit message"
+
+if [ -z "$1" ]; then
+  echo "Error: You must provide a commit message."
+  echo "Usage: gitstuff \"Your commit message\""
+  exit 1
+fi
+
+if ! git rev-parse --is-inside-work-tree > /dev/null 2>&1; then
+  echo "Error: Not a git repository."
+  exit 1
+fi
+
+echo "Staging all files..."
+git add .
+
+echo "Committing with message: $1"
+if ! git commit -m "$1"; then
+  echo "Error: Commit failed (nothing to commit, or a hook rejected it). Not pushing."
+  exit 1
+fi
+
+echo "Pushing..."
+if ! git push; then
+  echo "Error: Push failed. Your commit is saved locally; resolve the issue and push again."
+  exit 1
+fi
+
+echo "Git commands complete."

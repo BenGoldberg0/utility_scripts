@@ -1,0 +1,57 @@
+#!/bin/bash
+
+# Extract common archive formats safely.
+# Multi-file archives are extracted into a dedicated subdirectory (named after
+# the archive) to avoid clobbering the current directory and to contain any
+# malicious "../" paths. Single-file compressors keep the original file.
+# Usage: extract <file> [file2 ...]
+
+if [ $# -eq 0 ]; then
+  echo "Usage: extract <file> [file2 ...]"
+  exit 1
+fi
+
+for file in "$@"; do
+  if [ ! -f "$file" ]; then
+    echo "Error: '$file' is not a valid file."
+    continue
+  fi
+
+  echo "Extracting '$file'..."
+
+  # Destination dir for multi-file archives: archive name minus its extension(s).
+  base=$(basename -- "$file")
+  case "$base" in
+    *.tar.bz2|*.tar.gz|*.tar.xz|*.tar.zst) dest="${base%.tar.*}" ;;
+    *) dest="${base%.*}" ;;
+  esac
+
+  case "$file" in
+    *.tar.bz2)  mkdir -p -- "$dest" && tar xjf        "$file" -C "$dest" ;;
+    *.tar.gz)   mkdir -p -- "$dest" && tar xzf        "$file" -C "$dest" ;;
+    *.tar.xz)   mkdir -p -- "$dest" && tar xJf        "$file" -C "$dest" ;;
+    *.tar.zst)  mkdir -p -- "$dest" && tar --zstd -xf "$file" -C "$dest" ;;
+    *.tar)      mkdir -p -- "$dest" && tar xf         "$file" -C "$dest" ;;
+    *.tbz2)     mkdir -p -- "$dest" && tar xjf        "$file" -C "$dest" ;;
+    *.tgz)      mkdir -p -- "$dest" && tar xzf        "$file" -C "$dest" ;;
+    *.zip)      mkdir -p -- "$dest" && unzip -q       "$file" -d "$dest" ;;
+    *.7z)       mkdir -p -- "$dest" && 7z x -o"$dest" "$file" ;;
+    *.rar)      mkdir -p -- "$dest" && unrar x        "$file" "$dest"/ ;;
+    *.bz2)      bunzip2 -k "$file" ;;
+    *.gz)       gunzip  -k "$file" ;;
+    *.xz)       unxz    -k "$file" ;;
+    *.zst)      unzstd  -k "$file" ;;
+    *.Z)        gunzip  -k "$file" ;;
+    *)
+      echo "Error: Unsupported format for '$file'."
+      continue
+      ;;
+  esac
+  rc=$?
+
+  if [ "$rc" -eq 0 ]; then
+    echo "Done: '$file'"
+  else
+    echo "Failed: '$file'"
+  fi
+done

@@ -1,0 +1,126 @@
+#!/bin/bash
+
+# Build a unified timeline of who accessed the machine and when.
+# Combines: last (successful logins), lastb (failed logins), who (current),
+#           and SSH auth logs.
+# Usage: whowasin              (last 24 hours)
+#        whowasin 7            (last 7 days)
+#        whowasin --all        (everything available)
+#        whowasin --current    (just who's logged in right now)
+
+if [ "$(id -u)" -ne 0 ]; then
+  echo "Error: Must run as root (use sudo)."
+  exit 1
+fi
+
+range="$1"
+
+# --- Current sessions only ---
+if [ "$range" = "--current" ]; then
+  echo "Currently logged in:"
+  echo ""
+  who -u 2>/dev/null
+  echo ""
+  sessions=$(who 2>/dev/null | wc -l)
+  echo "${sessions} active session(s)."
+  exit 0
+fi
+
+# Determine the time window. 'last'/'lastb' get a native --since date; journald
+# gets its own relative filter (kept as an array so the value stays one arg).
+last_filter=()
+since_journal=()
+if [ "$range" = "--all" ]; then
+  label="all available records"
+elif [[ "$range" =~ ^[0-9]+$ ]]; then
+  since_date=$(date -d "$range days ago" "+%Y-%m-%d" 2>/dev/null)
+  [ -n "$since_date" ] && last_filter=(--since "$since_date")
+  since_journal=(--since "${range} days ago")
+  label="last ${range} day(s)"
+else
+  since_date=$(date -d "1 day ago" "+%Y-%m-%d" 2>/dev/null)
+  [ -n "$since_date" ] && last_filter=(--since "$since_date")
+  since_journal=(--since "24 hours ago")
+  label="last 24 hours"
+fi
+
+# If this 'last' doesn't support --since (older util-linux), drop the filter and
+# degrade gracefully to unfiltered output rather than printing nothing.
+if [ ${#last_filter[@]} -gt 0 ] && ! last -F "${last_filter[@]}" >/dev/null 2>&1; then
+  last_filter=()
+fi
+
+echo "Access timeline — ${label}"
+echo ""
+
+echo "=== CURRENTLY LOGGED IN ==="
+echo ""
+who -u 2>/dev/null || echo "  (none)"
+echo ""
+
+echo "=== SUCCESSFUL LOGINS ==="
+echo ""
+last -F "${last_filter[@]}" 2>/dev/null \
+  | grep -vE '^$|^wtmp|^reboot|^shutdown' | head -40
+echo ""
+
+echo "=== FAILED LOGINS ==="
+echo ""
+failed=$(lastb -F "${last_filter[@]}" 2>/dev/null | grep -vE '^$|^btmp' | head -40)
+if [ -n "$failed" ]; then
+  echo "$failed"
+else
+  echo "  (none)"
+fi
+echo ""
+
+echo "=== SSH LOG ACTIVITY ==="
+echo ""
+
+get_ssh_logs() {
+  if command -v journalctl > /dev/null 2>&1; then
+    journalctl "${since_journal[@]}" --no-pager \
+      _SYSTEMD_UNIT=sshd.service + _SYSTEMD_UNIT=ssh.service 2>/dev/null
+  elif [ -f /var/log/auth.log ]; then
+    cat /var/log/auth.log
+  elif [ -f /var/log/secure ]; then
+    cat /var/log/secure
+  fi
+}
+
+ssh_logs=$(get_ssh_logs)
+
+if [ -n "$ssh_logs" ]; then
+  accepted=$(printf '%s\n' "$ssh_logs" | grep "Accepted" | tail -20)
+  if [ -n "$accepted" ]; then
+    echo "[Accepted connections]"
+    printf '%s\n' "$accepted" | while IFS= read -r line; do echo "  $line"; done
+    echo ""
+  fi
+
+  rejected=$(printf '%s\n' "$ssh_logs" | grep -iE "failed password|invalid user" | tail -20)
+  if [ -n "$rejected" ]; then
+    echo "[Failed attempts]"
+    printf '%s\n' "$rejected" | while IFS= read -r line; do echo "  $line"; done
+    echo ""
+  fi
+
+  closed=$(printf '%s\n' "$ssh_logs" | grep -iE "disconnected|connection closed" | tail -20)
+  if [ -n "$closed" ]; then
+    echo "[Disconnections]"
+    printf '%s\n' "$closed" | while IFS= read -r line; do echo "  $line"; done
+    echo ""
+  fi
+else
+  echo "  (no SSH logs found)"
+fi
+
+echo "=== SUMMARY ==="
+echo ""
+current=$(who 2>/dev/null | wc -l)
+success=$(last "${last_filter[@]}" 2>/dev/null | grep -vE '^$|^wtmp|^reboot|^shutdown' | wc -l)
+failures=$(lastb "${last_filter[@]}" 2>/dev/null | grep -vE '^$|^btmp' | wc -l)
+
+echo "  Active sessions:    $current"
+echo "  Successful logins:  $success (within window)"
+echo "  Failed attempts:    $failures (within window)"

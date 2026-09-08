@@ -1,0 +1,108 @@
+#!/bin/bash
+
+# Flag processes running from suspicious locations or in suspicious states.
+# Detection is based on /proc/<pid>/exe (the real backing binary), not the
+# spoofable process name reported by ps.
+# Usage: susprocess
+
+if [ "$(id -u)" -ne 0 ]; then
+  echo "Error: Must run as root (use sudo)."
+  exit 1
+fi
+
+found=0
+
+check() {
+  local label="$1" results="$2"
+  if [ -n "$results" ]; then
+    if [ "$found" -eq 0 ]; then
+      echo "Suspicious processes found:"
+      echo ""
+    fi
+    found=1
+    echo "--- $label ---"
+    echo ""
+    echo "$results"
+    echo ""
+  fi
+}
+
+# A directory is "user-writable" if a non-root user could write to it: the
+# other-write bit is set, OR the group-write bit is set with a non-root group,
+# OR it is owned by a non-root user. This is checked from the actual mode bits
+# rather than with `[ -w ]`, which is always true for root and so meaningless.
+is_user_writable_dir() {
+  local d="$1" mode owner grp last second
+  mode=$(stat -c '%a' "$d" 2>/dev/null) || return 1
+  owner=$(stat -c '%u' "$d" 2>/dev/null)
+  grp=$(stat -c '%g' "$d" 2>/dev/null)
+  while [ ${#mode} -lt 3 ]; do mode="0$mode"; done
+  last="${mode: -1}"
+  second="${mode: -2:1}"
+  case "$last" in 2|3|6|7) return 0 ;; esac
+  case "$second" in 2|3|6|7) [ "$grp" != "0" ] && return 0 ;; esac
+  [ "$owner" != "0" ] && return 0
+  return 1
+}
+
+sus_dirs=""
+hidden=""
+deleted=""
+no_exe=""
+root_writable=""
+
+for pid_path in /proc/[0-9]*; do
+  pid=$(basename "$pid_path")
+  user=$(stat -c '%U' "$pid_path" 2>/dev/null)
+  cmd=$(tr '\0' ' ' < "$pid_path/cmdline" 2>/dev/null)
+
+  # Resolve the backing executable.
+  if ! exe=$(readlink "$pid_path/exe" 2>/dev/null); then
+    # No readable exe link. Skip kernel threads (which have an empty cmdline).
+    [ -n "$cmd" ] && no_exe+="  PID ${pid}  USER ${user}  CMD ${cmd}"$'\n'
+    continue
+  fi
+  [ -z "$exe" ] && continue
+
+  # Path with any trailing " (deleted)" marker removed, for path matching.
+  exe_path="${exe% (deleted)}"
+
+  # Deleted binary still running.
+  if [ "$exe_path" != "$exe" ]; then
+    deleted+="  PID ${pid}  USER ${user}  EXE ${exe}  CMD ${cmd}"$'\n'
+  fi
+
+  # Running from /tmp, /dev/shm, or /var/tmp.
+  case "$exe_path" in
+    /tmp/*|/dev/shm/*|/var/tmp/*)
+      sus_dirs+="  PID ${pid}  USER ${user}  EXE ${exe_path}"$'\n' ;;
+  esac
+
+  # Running from a hidden directory/file (a path component starting with a dot).
+  case "$exe_path" in
+    */.*)
+      hidden+="  PID ${pid}  USER ${user}  EXE ${exe_path}"$'\n' ;;
+  esac
+
+  # Root process whose binary lives in a directory a non-root user can write.
+  if [ "$user" = "root" ]; then
+    dir=$(dirname "$exe_path")
+    case "$dir" in
+      /usr/*|/opt/*|/bin|/bin/*|/sbin|/sbin/*|/lib|/lib/*|/lib64|/lib64/*) : ;;
+      *)
+        if is_user_writable_dir "$dir"; then
+          root_writable+="  PID ${pid}  DIR ${dir}  CMD ${cmd}"$'\n'
+        fi ;;
+    esac
+  fi
+done
+
+check "Running from /tmp, /dev/shm, or /var/tmp"      "$(printf '%s' "$sus_dirs")"
+check "Running from deleted binaries"                  "$(printf '%s' "$deleted")"
+check "Running from hidden directories"                "$(printf '%s' "$hidden")"
+check "No readable executable link"                    "$(printf '%s' "$no_exe")"
+check "Root processes in user-writable directories"    "$(printf '%s' "$root_writable")"
+
+if [ "$found" -eq 0 ]; then
+  echo "No suspicious processes found. Looking clean."
+fi

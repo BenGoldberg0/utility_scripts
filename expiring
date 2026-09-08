@@ -1,0 +1,186 @@
+#!/bin/bash
+
+# Check for soon-to-expire SSL certs, user passwords, and aging SSH keys.
+# Usage: expiring              (within 30 days)
+#        expiring 7            (within 7 days)
+#        expiring 90           (within 90 days)
+
+if [ "$(id -u)" -ne 0 ]; then
+  echo "Error: Must run as root (use sudo)."
+  exit 1
+fi
+
+days="${1:-30}"
+if ! [[ "$days" =~ ^[0-9]+$ ]] || [ "$days" -eq 0 ]; then
+  echo "Error: please pass a positive number of days."
+  echo "Usage: expiring [days]"
+  exit 1
+fi
+
+now=$(date +%s)
+warnings=0
+
+echo "Checking for things expiring within ${days} day(s)..."
+echo ""
+
+# --- SSL/TLS certificates ---
+echo "=== SSL/TLS CERTIFICATES ==="
+echo ""
+
+# The system trust store (/etc/ssl/certs) is intentionally excluded: those are
+# CA certificates you don't manage.
+cert_dirs=(
+  /etc/letsencrypt/live
+  /etc/pki/tls/certs
+  /etc/nginx/ssl
+  /etc/apache2/ssl
+  /etc/httpd/ssl
+)
+
+found_certs=false
+
+for dir in "${cert_dirs[@]}"; do
+  [ -d "$dir" ] || continue
+  # -L follows symlinks so Let's Encrypt's live/ symlinked certs are checked.
+  while IFS= read -r cert; do
+    [ -f "$cert" ] || continue
+
+    case "$(basename "$cert")" in
+      ca-bundle*|ca-certificates*) continue ;;
+    esac
+
+    grep -q "BEGIN CERTIFICATE" "$cert" 2>/dev/null || continue
+
+    expiry=$(openssl x509 -enddate -noout -in "$cert" 2>/dev/null | cut -d= -f2)
+    [ -z "$expiry" ] && continue
+
+    expiry_epoch=$(date -d "$expiry" +%s 2>/dev/null)
+    [ -z "$expiry_epoch" ] && continue
+
+    remaining=$(( (expiry_epoch - now) / 86400 ))
+
+    if [ "$remaining" -le "$days" ]; then
+      found_certs=true
+      warnings=$((warnings + 1))
+      subject=$(openssl x509 -subject -noout -in "$cert" 2>/dev/null | sed 's/subject=//')
+
+      if [ "$remaining" -lt 0 ]; then
+        status="EXPIRED ($(( remaining * -1 )) day(s) ago)"
+      elif [ "$remaining" -eq 0 ]; then
+        status="EXPIRES TODAY"
+      else
+        status="expires in ${remaining} day(s)"
+      fi
+
+      echo "  [!] $cert"
+      echo "      Subject: $subject"
+      echo "      $status — $expiry"
+      echo ""
+    fi
+  done < <(find -L "$dir" -type f \( -name '*.pem' -o -name '*.crt' -o -name '*.cert' \) 2>/dev/null)
+done
+
+if [ "$found_certs" = false ]; then
+  echo "  (no expiring certificates found)"
+  echo ""
+fi
+
+# --- User password expiry ---
+echo "=== USER PASSWORDS ==="
+echo ""
+
+found_passwords=false
+
+while IFS=: read -r user _ uid _ _ _ shell; do
+  [[ "$uid" =~ ^[0-9]+$ ]] || continue
+  [ "$uid" -lt 1000 ] && continue
+  echo "$shell" | grep -qE '(nologin|false)$' && continue
+
+  # LC_ALL=C keeps chage's field labels in English for parsing.
+  expiry_date=$(LC_ALL=C chage -l "$user" 2>/dev/null | grep 'Password expires' | cut -d: -f2 | xargs)
+
+  [ -z "$expiry_date" ] && continue
+  [ "$expiry_date" = "never" ] && continue
+
+  expiry_epoch=$(date -d "$expiry_date" +%s 2>/dev/null)
+  [ -z "$expiry_epoch" ] && continue
+
+  remaining=$(( (expiry_epoch - now) / 86400 ))
+
+  if [ "$remaining" -le "$days" ]; then
+    found_passwords=true
+    warnings=$((warnings + 1))
+
+    if [ "$remaining" -lt 0 ]; then
+      status="EXPIRED ($(( remaining * -1 )) day(s) ago)"
+    elif [ "$remaining" -eq 0 ]; then
+      status="EXPIRES TODAY"
+    else
+      status="expires in ${remaining} day(s)"
+    fi
+
+    last_change=$(LC_ALL=C chage -l "$user" 2>/dev/null | grep 'Last password change' | cut -d: -f2 | xargs)
+    echo "  [!] $user — $status"
+    echo "      Last changed: $last_change"
+    echo ""
+  fi
+done < /etc/passwd
+
+if [ "$found_passwords" = false ]; then
+  echo "  (no expiring passwords found)"
+  echo ""
+fi
+
+# --- SSH key age ---
+echo "=== SSH HOST & USER KEYS ==="
+echo ""
+
+found_keys=false
+key_warn_days="${SSH_KEY_AGE_WARN:-365}"
+
+check_key_age() {
+  local keyfile="$1" label="$2" mtime_epoch age_days modified
+  [ -f "$keyfile" ] || return
+
+  mtime_epoch=$(stat -c %Y "$keyfile" 2>/dev/null)
+  [ -z "$mtime_epoch" ] && return
+
+  age_days=$(( (now - mtime_epoch) / 86400 ))
+
+  if [ "$age_days" -ge "$key_warn_days" ]; then
+    found_keys=true
+    warnings=$((warnings + 1))
+    modified=$(date -d "@$mtime_epoch" "+%Y-%m-%d")
+    echo "  [!] $label"
+    echo "      File: $keyfile"
+    echo "      Last modified: $modified (${age_days} days ago)"
+    echo ""
+  fi
+}
+
+for keyfile in /etc/ssh/ssh_host_*_key; do
+  check_key_age "$keyfile" "SSH host key"
+done
+
+while IFS=: read -r user _ uid _ _ home _; do
+  [[ "$uid" =~ ^[0-9]+$ ]] || continue
+  [ "$uid" -lt 1000 ] && continue
+  for keyfile in "$home"/.ssh/id_*; do
+    case "$keyfile" in *.pub) continue ;; esac
+    check_key_age "$keyfile" "User key ($user)"
+  done
+done < /etc/passwd
+
+if [ "$found_keys" = false ]; then
+  echo "  (no aging SSH keys found — threshold: ${key_warn_days} days)"
+  echo ""
+fi
+
+# --- Summary ---
+echo "=== SUMMARY ==="
+echo ""
+if [ "$warnings" -eq 0 ]; then
+  echo "  Nothing expiring within ${days} day(s). Looking good."
+else
+  echo "  ${warnings} item(s) need attention within ${days} day(s)."
+fi

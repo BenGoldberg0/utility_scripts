@@ -1,0 +1,103 @@
+#!/bin/bash
+
+# Snapshot open ports and compare against the last snapshot.
+# Usage: portdiff              (snapshot and diff)
+#        portdiff --show        (show current snapshot without diffing)
+#        portdiff --reset       (delete saved snapshot and start fresh)
+
+SNAPSHOT_DIR="${PORTDIFF_DIR:-$HOME/.portdiff}"
+CURRENT="$SNAPSHOT_DIR/current.txt"
+PREVIOUS="$SNAPSHOT_DIR/previous.txt"
+
+if [ "$(id -u)" -ne 0 ]; then
+  echo "Error: Must run as root (use sudo)."
+  exit 1
+fi
+
+mkdir -p "$SNAPSHOT_DIR"
+
+# Emit one line per listening socket: proto, port, address, process NAME only
+# (no PID), so a service restart is not reported as a change.
+collect_ports() {
+  ss -tulnp 2>/dev/null | tail -n +2 | awk '{
+    proto = $1
+    addr  = $5
+    n = split($5, a, ":")
+    port = a[n]
+    proc = $7
+    if (match(proc, /"[^"]+"/)) {
+      proc = substr(proc, RSTART + 1, RLENGTH - 2)
+    } else {
+      proc = "-"
+    }
+    printf "%-6s %-8s %-25s %s\n", proto, port, addr, proc
+  }'
+}
+
+print_block() {
+  local title="$1" data="$2"
+  echo "$title"
+  echo ""
+  printf "  %-6s %-8s %-25s %s\n" "PROTO" "PORT" "ADDRESS" "PROCESS"
+  printf "  %-6s %-8s %-25s %s\n" "-----" "----" "-------" "-------"
+  printf '%s\n' "$data" | while IFS= read -r line; do
+    echo "  $line"
+  done
+}
+
+if [ "$1" = "--reset" ]; then
+  rm -f "$CURRENT" "$PREVIOUS"
+  echo "Snapshots cleared."
+  exit 0
+fi
+
+if [ "$1" = "--show" ]; then
+  echo "Current listening ports:"
+  echo ""
+  printf "%-6s %-8s %-25s %s\n" "PROTO" "PORT" "ADDRESS" "PROCESS"
+  printf "%-6s %-8s %-25s %s\n" "-----" "----" "-------" "-------"
+  collect_ports | sort -k2 -n
+  exit 0
+fi
+
+# Take a new snapshot in a canonical (byte) order so comm can compare it.
+snapshot=$(collect_ports | LC_ALL=C sort)
+
+if [ -z "$snapshot" ]; then
+  echo "Error: could not read listening ports (is 'ss' available?)."
+  exit 1
+fi
+
+# Rotate current -> previous, then write the new current.
+if [ -f "$CURRENT" ]; then
+  mv "$CURRENT" "$PREVIOUS"
+fi
+printf '%s\n' "$snapshot" > "$CURRENT"
+
+# No previous snapshot yet: just show what we captured.
+if [ ! -f "$PREVIOUS" ]; then
+  echo "First snapshot saved. Run again later to see changes."
+  echo ""
+  printf "%-6s %-8s %-25s %s\n" "PROTO" "PORT" "ADDRESS" "PROCESS"
+  printf "%-6s %-8s %-25s %s\n" "-----" "----" "-------" "-------"
+  printf '%s\n' "$snapshot" | sort -k2 -n
+  exit 0
+fi
+
+# Both files are LC_ALL=C-sorted, so comm compares them correctly.
+new_ports=$(LC_ALL=C comm -13 "$PREVIOUS" "$CURRENT" | sort -k2 -n)
+closed_ports=$(LC_ALL=C comm -23 "$PREVIOUS" "$CURRENT" | sort -k2 -n)
+
+if [ -z "$new_ports" ] && [ -z "$closed_ports" ]; then
+  echo "No changes since last snapshot."
+  exit 0
+fi
+
+if [ -n "$new_ports" ]; then
+  print_block "NEW ports since last snapshot:" "$new_ports"
+  echo ""
+fi
+
+if [ -n "$closed_ports" ]; then
+  print_block "CLOSED ports since last snapshot:" "$closed_ports"
+fi

@@ -1,0 +1,95 @@
+#!/bin/bash
+
+# Switch to main/master, pull latest, switch back, and rebase.
+# Auto-stashes uncommitted changes, including untracked files.
+
+if ! git rev-parse --is-inside-work-tree > /dev/null 2>&1; then
+  echo "Error: Not a git repository."
+  exit 1
+fi
+
+# Figure out the default branch name
+if git show-ref --verify --quiet refs/heads/main; then
+  default_branch="main"
+elif git show-ref --verify --quiet refs/heads/master; then
+  default_branch="master"
+else
+  echo "Error: No 'main' or 'master' branch found."
+  exit 1
+fi
+
+current_branch=$(git branch --show-current)
+
+if [ -z "$current_branch" ]; then
+  echo "Error: Detached HEAD state. Check out a branch first."
+  exit 1
+fi
+
+# If already on the default branch, just pull
+if [ "$current_branch" = "$default_branch" ]; then
+  echo "Already on $default_branch. Pulling latest..."
+  git pull
+  exit $?
+fi
+
+# Stash uncommitted changes, including untracked files, so a checkout can't be
+# blocked by an untracked file that also exists on the default branch.
+stashed=false
+if ! git diff --quiet \
+   || ! git diff --cached --quiet \
+   || [ -n "$(git ls-files --others --exclude-standard)" ]; then
+  echo "Stashing uncommitted changes (including untracked)..."
+  if git stash push --include-untracked -m "gitfresh auto-stash"; then
+    stashed=true
+  else
+    echo "Error: Failed to stash changes."
+    exit 1
+  fi
+fi
+
+restore_stash() {
+  if [ "$stashed" = true ]; then
+    echo "Restoring stashed changes..."
+    if ! git stash pop; then
+      echo "Warning: stash pop hit conflicts. Resolve them; your stash is kept (see 'git stash list')."
+      return 1
+    fi
+  fi
+  return 0
+}
+
+echo "Switching to $default_branch..."
+if ! git checkout "$default_branch"; then
+  echo "Error: Failed to switch to $default_branch."
+  restore_stash
+  exit 1
+fi
+
+echo "Pulling latest..."
+if ! git pull; then
+  echo "Error: Pull failed. Switching back to $current_branch."
+  git checkout "$current_branch"
+  restore_stash
+  exit 1
+fi
+
+echo "Switching back to $current_branch..."
+if ! git checkout "$current_branch"; then
+  echo "Error: Failed to switch back to $current_branch. You are on $default_branch; your stash (if any) is preserved."
+  exit 1
+fi
+
+echo "Rebasing onto $default_branch..."
+if git rebase "$default_branch"; then
+  echo "Rebase successful."
+else
+  echo "Rebase conflicts detected. Resolve them, then run 'git rebase --continue'."
+  echo "Note: your auto-stash was NOT applied. Run 'git stash pop' after the rebase finishes."
+  exit 1
+fi
+
+if restore_stash; then
+  echo "Done. $current_branch is up to date with $default_branch."
+else
+  exit 1
+fi

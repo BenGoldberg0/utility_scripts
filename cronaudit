@@ -1,0 +1,135 @@
+#!/bin/bash
+
+# List all scheduled tasks across the system in one place.
+# Covers: user crontabs, /etc/crontab, /etc/cron.d/*, cron.{hourly,daily,weekly,
+#         monthly}, at jobs, and systemd timers.
+# Usage: cronaudit
+
+if [ "$(id -u)" -ne 0 ]; then
+  echo "Error: Must run as root (use sudo)."
+  exit 1
+fi
+
+divider() {
+  echo ""
+  echo "=== $1 ==="
+  echo ""
+}
+
+# Drop comments, blank lines, and environment assignments (NAME=value), which
+# cron treats as variable settings rather than scheduled jobs.
+strip_noise() {
+  grep -vE '^[[:space:]]*#' \
+    | grep -vE '^[[:space:]]*$' \
+    | grep -vE '^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*[[:space:]]*='
+}
+
+# --- User crontabs ---
+divider "USER CRONTABS"
+
+found_user_cron=false
+while IFS=: read -r user _; do
+  crontab=$(crontab -l -u "$user" 2>/dev/null | strip_noise)
+  if [ -n "$crontab" ]; then
+    found_user_cron=true
+    echo "[$user]"
+    printf '%s\n' "$crontab" | while IFS= read -r line; do
+      echo "  $line"
+    done
+    echo ""
+  fi
+done < /etc/passwd
+
+if [ "$found_user_cron" = false ]; then
+  echo "  (none)"
+fi
+
+# --- /etc/crontab ---
+divider "SYSTEM CRONTAB (/etc/crontab)"
+
+if [ -f /etc/crontab ]; then
+  content=$(strip_noise < /etc/crontab)
+  if [ -n "$content" ]; then
+    printf '%s\n' "$content" | while IFS= read -r line; do
+      echo "  $line"
+    done
+  else
+    echo "  (no active entries)"
+  fi
+else
+  echo "  (not found)"
+fi
+
+# --- /etc/cron.d/ ---
+divider "CRON DROP-INS (/etc/cron.d/)"
+
+if [ -d /etc/cron.d ]; then
+  found_cron_d=false
+  for file in /etc/cron.d/*; do
+    [ -f "$file" ] || continue
+    content=$(strip_noise < "$file")
+    if [ -n "$content" ]; then
+      found_cron_d=true
+      echo "[$(basename "$file")]"
+      printf '%s\n' "$content" | while IFS= read -r line; do
+        echo "  $line"
+      done
+      echo ""
+    fi
+  done
+  if [ "$found_cron_d" = false ]; then
+    echo "  (empty)"
+  fi
+else
+  echo "  (directory not found)"
+fi
+
+# --- Periodic scripts ---
+divider "PERIODIC SCRIPTS"
+
+for period in hourly daily weekly monthly; do
+  dir="/etc/cron.${period}"
+  [ -d "$dir" ] || continue
+  found_period=false
+  for script in "$dir"/*; do
+    [ -e "$script" ] || continue
+    name=$(basename "$script")
+    [ "$name" = ".placeholder" ] && continue
+    if [ "$found_period" = false ]; then
+      echo "[$period]"
+      found_period=true
+    fi
+    echo "  $name"
+  done
+  [ "$found_period" = true ] && echo ""
+done
+
+# --- at jobs ---
+divider "AT JOBS"
+
+if command -v atq > /dev/null 2>&1; then
+  at_jobs=$(atq 2>/dev/null)
+  if [ -n "$at_jobs" ]; then
+    printf '%s\n' "$at_jobs" | while IFS= read -r line; do
+      echo "  $line"
+    done
+  else
+    echo "  (none)"
+  fi
+else
+  echo "  (at not installed)"
+fi
+
+# --- systemd timers ---
+divider "SYSTEMD TIMERS"
+
+if command -v systemctl > /dev/null 2>&1; then
+  timers=$(systemctl list-timers --all --no-pager 2>/dev/null)
+  if [ -n "$timers" ]; then
+    printf '%s\n' "$timers"
+  else
+    echo "  (none)"
+  fi
+else
+  echo "  (systemd not available)"
+fi

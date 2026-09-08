@@ -1,0 +1,52 @@
+#!/bin/bash
+
+# Quick weather forecast using wttr.in
+# Usage: weather                        (auto-detected location)
+#        weather "new york"             (by city name)
+#        weather 90210                  (by US zip code)
+#        weather "SW1A 1AA" GB          (by postal code + country code)
+#        weather -s                     (one-line summary)
+
+if ! command -v curl > /dev/null 2>&1; then
+  echo "Error: curl is required but not installed."
+  exit 1
+fi
+
+# Percent-encode a string for safe use in a URL path segment.
+# LC_ALL=C forces byte-wise iteration so multibyte UTF-8 (e.g. "München")
+# is encoded as its UTF-8 bytes, correctly, regardless of the caller's locale.
+urlencode() {
+  local LC_ALL=C string="$1" encoded="" pos c o
+  for (( pos=0; pos<${#string}; pos++ )); do
+    c="${string:$pos:1}"
+    case "$c" in
+      [-_.~a-zA-Z0-9]) o="$c" ;;
+      *) printf -v o '%%%02X' "'$c" ;;
+    esac
+    encoded+="$o"
+  done
+  printf '%s' "$encoded"
+}
+
+short=false
+if [ "$1" = "-s" ] || [ "$1" = "--short" ]; then
+  short=true
+  shift
+fi
+
+location="${1:-}"
+country="${2:-}"
+
+if [ -n "$country" ]; then
+  location="$(urlencode "$location"),$(urlencode "$country")"
+elif [ -n "$location" ]; then
+  location="$(urlencode "$location")"
+fi
+
+if [ "$short" = true ]; then
+  curl -fs "wttr.in/${location}?format=%l:+%C+%t+%w\n" \
+    || echo "Error: could not retrieve weather (bad location or network issue)."
+else
+  curl -fs "wttr.in/${location}?F" \
+    || echo "Error: could not retrieve weather (bad location or network issue)."
+fi

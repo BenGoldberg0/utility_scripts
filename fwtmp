@@ -1,0 +1,131 @@
+#!/bin/bash
+
+# Temporarily open a firewall port that auto-closes after a set time.
+# Works with both ufw and firewalld (auto-detected). The auto-close is
+# scheduled via systemd-run/at so it survives an SSH disconnect (it is not
+# tied to this shell).
+# Usage: fwtmp <port> [minutes] [protocol]
+#        fwtmp 3000          (opens port 3000 for 5 minutes, tcp)
+#        fwtmp 3000 15       (opens port 3000 for 15 minutes, tcp)
+#        fwtmp 5353 10 udp   (opens port 5353 for 10 minutes, udp)
+
+if [ "$(id -u)" -ne 0 ]; then
+  echo "Error: Must run as root (use sudo)."
+  exit 1
+fi
+
+# Detect firewall. Match the whole status word so "Status: inactive" is not a
+# false positive for "active".
+if command -v ufw > /dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
+  FIREWALL="ufw"
+elif command -v firewall-cmd > /dev/null 2>&1 && systemctl is-active --quiet firewalld; then
+  FIREWALL="firewalld"
+else
+  echo "Error: No supported firewall found (ufw or firewalld)."
+  exit 1
+fi
+
+if [ $# -eq 0 ]; then
+  echo "Usage: fwtmp <port> [minutes] [protocol]"
+  echo "  port       port number to open"
+  echo "  minutes    how long to keep it open (default: 5)"
+  echo "  protocol   tcp or udp (default: tcp)"
+  echo ""
+  echo "Detected firewall: $FIREWALL"
+  exit 1
+fi
+
+port="$1"
+minutes="${2:-5}"
+protocol="${3:-tcp}"
+
+if ! [[ "$port" =~ ^[0-9]+$ ]] || [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
+  echo "Error: Invalid port number."
+  exit 1
+fi
+
+if ! [[ "$minutes" =~ ^[0-9]+$ ]] || [ "$minutes" -eq 0 ]; then
+  echo "Error: Minutes must be a positive number."
+  exit 1
+fi
+
+if [ "$protocol" != "tcp" ] && [ "$protocol" != "udp" ]; then
+  echo "Error: Protocol must be 'tcp' or 'udp'."
+  exit 1
+fi
+
+# Never touch a port that is already open, so we can't close a rule we did not
+# create.
+if [ "$FIREWALL" = "ufw" ]; then
+  if ufw status 2>/dev/null | grep -qw "${port}/${protocol}"; then
+    echo "Port ${port}/${protocol} is already allowed in ufw. fwtmp won't modify it."
+    exit 0
+  fi
+else
+  if firewall-cmd --query-port="${port}/${protocol}" > /dev/null 2>&1; then
+    echo "Port ${port}/${protocol} is already open in firewalld. fwtmp won't modify it."
+    exit 0
+  fi
+fi
+
+# Build open/close commands for the detected firewall.
+if [ "$FIREWALL" = "ufw" ]; then
+  open_cmd=(ufw allow "${port}/${protocol}")
+  close_cmd=(ufw delete allow "${port}/${protocol}")
+else
+  # Runtime-only rule: a reboot or 'firewall-cmd --reload' also closes it.
+  open_cmd=(firewall-cmd "--add-port=${port}/${protocol}")
+  close_cmd=(firewall-cmd "--remove-port=${port}/${protocol}")
+fi
+
+# Open the port.
+if "${open_cmd[@]}" > /dev/null 2>&1; then
+  echo "Opened port ${port}/${protocol} for ${minutes} minute(s). [$FIREWALL]"
+else
+  echo "Error: Failed to open port."
+  exit 1
+fi
+
+# Schedule the close so it is NOT tied to this shell/session.
+scheduled=""
+unit="fwtmp-${port}-${protocol}"
+
+if command -v systemd-run > /dev/null 2>&1; then
+  if systemd-run --quiet --collect --on-active="${minutes}min" \
+       --unit="${unit}" --description="fwtmp auto-close ${port}/${protocol}" \
+       "${close_cmd[@]}" > /dev/null 2>&1; then
+    scheduled="systemd-run (survives disconnect)"
+  fi
+fi
+
+if [ -z "$scheduled" ] && command -v at > /dev/null 2>&1; then
+  if printf '%s\n' "${close_cmd[*]}" | at "now + ${minutes} minutes" > /dev/null 2>&1; then
+    scheduled="at (survives disconnect and reboot)"
+  fi
+fi
+
+if [ -z "$scheduled" ]; then
+  # Last resort: detach with setsid so an SSH hangup won't kill the timer.
+  setsid bash -c "sleep $(( minutes * 60 )); ${close_cmd[*]} > /dev/null 2>&1" \
+    < /dev/null > /dev/null 2>&1 &
+  scheduled="background timer (survives disconnect; lost on reboot)"
+fi
+
+echo "It will auto-close at $(date -d "+${minutes} minutes" "+%H:%M:%S") via ${scheduled}."
+
+if [ "$FIREWALL" = "ufw" ]; then
+  echo "To close it early: ufw delete allow ${port}/${protocol}"
+else
+  echo "To close it early: firewall-cmd --remove-port=${port}/${protocol}"
+fi
+
+# Cancellation instructions depend on which scheduler actually got used.
+case "$scheduled" in
+  systemd-run*)
+    echo "To cancel the auto-close timer: systemctl stop ${unit}.timer" ;;
+  at*)
+    echo "To cancel the auto-close: find the job with 'atq', then 'atrm <job#>'." ;;
+  *)
+    echo "Note: this background timer can't be cancelled cleanly — if you need to" \
+         "keep the port open, re-open it after the timer fires." ;;
+esac

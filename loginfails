@@ -1,0 +1,76 @@
+#!/bin/bash
+
+# Show failed SSH login attempts, grouped by IP.
+# Usage: loginfails            (last 24 hours)
+#        loginfails 7          (last 7 days)
+#        loginfails --all      (everything available)
+
+if [ "$(id -u)" -ne 0 ]; then
+  echo "Error: Must run as root (use sudo)."
+  exit 1
+fi
+
+range="$1"
+
+# Build the journalctl time filter as an array so the value stays a single arg.
+since=()
+if [ "$range" = "--all" ]; then
+  label="all time"
+elif [[ "$range" =~ ^[0-9]+$ ]]; then
+  since=(--since "${range} days ago")
+  label="last ${range} day(s)"
+else
+  since=(--since "24 hours ago")
+  label="last 24 hours"
+fi
+
+echo "Failed SSH login attempts — ${label}"
+echo "---"
+
+# Pull raw SSH log lines from whichever source is available. journalctl exits 0
+# even when a unit has no entries, so query both common unit names and merge
+# (with '+'), rather than relying on exit status to pick a fallback.
+raw=""
+have_source=false
+if command -v journalctl > /dev/null 2>&1; then
+  have_source=true
+  raw=$(journalctl "${since[@]}" --no-pager \
+          _SYSTEMD_UNIT=sshd.service + _SYSTEMD_UNIT=ssh.service 2>/dev/null)
+fi
+if [ -z "$raw" ] && [ -f /var/log/auth.log ]; then
+  have_source=true
+  raw=$(cat /var/log/auth.log)
+fi
+if [ -z "$raw" ] && [ -f /var/log/secure ]; then
+  have_source=true
+  raw=$(cat /var/log/secure)
+fi
+if [ "$have_source" = false ]; then
+  echo "Error: No supported log source found."
+  exit 1
+fi
+
+# Extract source IPs. "Failed password ... from <ip>" uses 'from';
+# PAM "authentication failure" lines use 'rhost=<ip>'.
+fails=$(printf '%s\n' "$raw" \
+  | grep -iE "failed password|authentication failure|invalid user" \
+  | grep -oP '(from |rhost=)\K[0-9a-fA-F.:]+' \
+  | grep -viE '^(unknown|localhost)$' \
+  | sort | uniq -c | sort -rn)
+
+if [ -z "$fails" ]; then
+  echo "No failed attempts found. Looking good."
+  exit 0
+fi
+
+total=$(printf '%s\n' "$fails" | awk '{sum += $1} END {print sum}')
+
+echo ""
+printf "  %-8s  %s\n" "ATTEMPTS" "IP ADDRESS"
+printf "  %-8s  %s\n" "--------" "----------"
+printf '%s\n' "$fails" | while read -r count ip; do
+  printf "  %-8s  %s\n" "$count" "$ip"
+done
+
+echo ""
+echo "Total: ${total} failed attempt(s) from $(printf '%s\n' "$fails" | wc -l | tr -d ' ') unique IP(s)."
