@@ -1,3 +1,6 @@
+## coinflip
+self explanatory
+
 ## gitstuff
 run `gitstuff "<commit message>"`.
 
